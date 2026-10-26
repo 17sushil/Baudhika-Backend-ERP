@@ -5,8 +5,8 @@ import {
   NotFoundException,
   ForbiddenException,
 } from '@nestjs/common';
-import { TenantStatus } from '../tenants/tenant.master.entity';
-import { TenantsService } from '../tenants/tenants.service';
+import { TenantStatus } from '../tenants/entities/tenant.master.entity';
+import { TenantsService } from '../tenants/services/tenants.service';
 
 @Injectable()
 export class TenantMiddleware implements NestMiddleware {
