@@ -26,14 +26,17 @@
     "migration:tenant:run": "typeorm-ts-node-commonjs migration:run -d src/database/tenant.data-source.ts",
     "migration:tenants:run-all": "ts-node src/database/migrate-tenants.ts",
     "migration:master:run:prod": "typeorm migration:run -d dist/database/master.data-source.js",
-    "migration:tenants:run-all:prod": "node dist/database/migrate-tenants.js"
+    "migration:tenants:run-all:prod": "node dist/database/migrate-tenants.js",
+    "seed:platform-admin": "ts-node src/database/seed-platform-admin.ts"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
     "@nestjs/config": "^12.0.1",
     "@nestjs/core": "^12.0.1",
+    "@nestjs/jwt": "^12.0.3",
     "@nestjs/platform-express": "^12.0.1",
     "@nestjs/typeorm": "^12.0.2",
+    "argon2": "^0.45.1",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "dotenv": "^18.0.9",
