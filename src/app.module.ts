@@ -1,24 +1,40 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ConfigModule } from '@nestjs/config';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { masterOptions } from './database/master-options';
-import { TenantsModule } from './tenants/tenants.module';
-import { UsersModule } from './users/users.module';
-import { AppService } from './app.service';
-import { TenantDbModule } from './tenant-db/tenant-db.module';
 import { AppController } from './app.controller';
-import { PlatformModule } from './platform/platform.module';
+import { AppService } from './app.service';
+import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { validateEnv } from './config/env.validation';
+import { masterOptions } from './database/master/master-options';
+import { PlatformModule } from './modules/master/platform-auth/platform.module';
+import { TenantsModule } from './modules/master/tenants/tenants.module';
+import { TenantAuthModule } from './modules/tenant/auth/tenant-auth.module';
+import { TenantDbModule } from './modules/tenant/context/tenant-db.module';
+import { UsersModule } from './modules/tenant/users/users.module';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
     TypeOrmModule.forRootAsync({ useFactory: () => masterOptions() }),
-    TenantsModule,
+    // Per-instance, per-IP. Behind several instances use a shared store (e.g. Redis) for exact limits.
+    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 300 }]),
     TenantDbModule,
+
+    // Control plane (master DB)
+    PlatformModule,
+    TenantsModule,
+
+    // Tenant plane (one DB per school)
+    TenantAuthModule,
     UsersModule,
-    PlatformModule
   ],
   controllers: [AppController],
-  providers: [AppService],
-})  
+  providers: [
+    AppService,
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_INTERCEPTOR, useClass: TransformInterceptor },
+  ],
+})
 export class AppModule {}

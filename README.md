@@ -1,6 +1,8 @@
-# Multi-Tenant Backend (NestJS + PostgreSQL + TypeORM)
+# School ERP Backend (NestJS + PostgreSQL + TypeORM)
 
-Database-per-tenant architecture. One **master** database holds the tenant registry. Every tenant gets its **own PostgreSQL database**. The tenant is resolved on each request from the `x-tenant-id` header.
+Database-per-tenant architecture. One **master** database (the control plane) holds the tenant registry,
+platform admins and branding. Every school (tenant) gets its **own PostgreSQL database and its own
+Postgres role**. No `tenant_id` columns: isolation is the database boundary.
 
 All schema changes go through **migrations**. `synchronize` is `false` everywhere and must stay that way.
 
@@ -9,81 +11,65 @@ All schema changes go through **migrations**. `synchronize` is `false` everywher
 ## 1. How it works
 
 ```
-Request ──> TenantMiddleware ──> reads x-tenant-id, looks it up in master DB
-                │
-                └─> req.tenant = { slug, dbName, ... }
-                         │
-                         v
-              TENANT_DS (request-scoped provider)
-                         │
-                         v
-          TenantConnectionService.get(dbName)  ──> cached DataSource per tenant
-                         │
-                         v
-                 Service uses ds.getRepository(...)
+Request (x-tenant-id: sunrise, Authorization: Bearer <tenant JWT>)
+   │
+   ├─ TenantMiddleware      validates slug, looks it up (30 s in-memory cache), rejects
+   │                        unknown / provisioning / failed (404) and suspended (403) tenants
+   │
+   ├─ TenantConnectionService.get(tenant)   LRU of small per-tenant pools; idle pools are closed
+   │
+   ├─ TenantContext (AsyncLocalStorage)     { tenant, dataSource } for the rest of the request
+   │
+   └─ TenantAuthGuard       verifies JWT (tenant secret + audience), token.tid === tenant.id,
+                            session not revoked, user active, password change not pending,
+                            @RequirePermissions(...) at institution scope
 ```
 
-Two databases kinds, two migration sets:
+Services never take a tenant id from the client: they call `ctx.repo(Entity)` on `TenantContext`.
 
 | | Master DB | Tenant DBs |
 |---|---|---|
-| Contains | `tenants` registry table | All business tables (users, ...) |
-| Count | 1 | One per tenant |
-| Entities | Explicitly listed (`Tenant`) | Any file named `*.tenant.master.entity.ts` |
-| Migrations folder | `src/migrations/master` | `src/migrations/tenant` |
-| Applied by | `migration:master:run` | `migration:tenants:run-all` |
+| Contains | tenants, tenant_branding, platform_users, platform sessions + audit | users, roles, permissions, user_roles, user_sessions, ... |
+| Count | 1 | One per school |
+| Entities | `*.master.entity.ts` | `*.tenant.entity.ts` |
+| Migrations | `src/migrations/master` | `src/migrations/tenant` |
+| Applied by | `migration:master:run` | `migration:tenants:run-all` (and on tenant creation) |
 
 ---
 
 ## 2. Prerequisites
 
-- Node.js 18+ and npm
-- PostgreSQL running locally, plus pgAdmin
-- The Postgres role used in `.env` must have `CREATEDB` (the default `postgres` superuser does)
+- Node.js 20+ and npm
+- PostgreSQL 14+ **with the contrib package** (`citext`). Fedora: `sudo dnf install postgresql-contrib`
+  (or the PGDG `postgresql18-contrib`); Debian/Ubuntu ship it with the server. Managed Postgres has it.
+- The role in `DB_USER` (or `PROVISIONER_DB_USER`) needs `CREATEDB` and `CREATEROLE`.
 
 ---
 
-## 3. First-time setup (new developer)
+## 3. First-time setup
 
 ```bash
-git clone <repo> && cd backend
 npm install
-cp .env.example .env        # then edit values
+cp .env.template .env        # fill it in; generate secrets with openssl (see comments)
 ```
 
-`.env`:
-
-```
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=postgres
-DB_PASS=yourpassword
-MASTER_DB_NAME=master_db
-TENANT_DB_NAME=tenant_template
-```
-
-In pgAdmin create **two empty databases**:
-
-1. `master_db` : the tenant registry
-2. `tenant_template` : a scratch database, only used so TypeORM can compare entities against the current tenant schema when generating migrations. It never holds real data.
-
-Then apply all migrations:
+Create two empty databases: `master_db` and `tenant_template` (scratch DB used only to generate
+tenant migrations). Then:
 
 ```bash
-npm run migration:master:run     # creates the tenants table in master_db
-npm run migration:tenant:run     # brings tenant_template up to date
+npm run migration:master:run
+npm run migration:tenant:run
+npm run seed:platform-admin      # needs SEED_ADMIN_EMAIL / SEED_ADMIN_PASSWORD
 npm run start:dev
 ```
 
-Create a first tenant to test:
+Create a school (platform admin token from `POST /platform/auth/login` + `verify-otp`):
 
 ```bash
-curl -X POST localhost:3000/tenants \
+curl -X POST localhost:4000/tenants -H "Authorization: Bearer $PLATFORM_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"Acme","slug":"acme"}'
+  -d '{"name":"Sunrise School","slug":"sunrise","adminEmail":"admin@sunrise.edu","adminPassword":"a-long-initial-password"}'
 ```
-
-pgAdmin will now show a `tenant_acme` database with all tenant tables.
 
 ---
 
@@ -91,46 +77,85 @@ pgAdmin will now show a `tenant_acme` database with all tenant tables.
 
 ```
 src/
+  main.ts                      helmet, CORS, validation, trust proxy
+  app.module.ts                config validation, throttling, module wiring
+  config/env.validation.ts     fail-fast env checks (secrets present, distinct, long enough)
+  common/
+    constants/                 throttle presets
+    interceptors/              TransformInterceptor: { statusCode, message, data } success envelope
+    utils/                     crypto (hashing, AES-GCM), passwords (argon2id), client IP
+                               (add guards/, decorators/, filters/ here as they appear)
+  infra/mail/                  MailService (console driver in dev)
   database/
-    tenant-options.ts          # builds DataSource options for any tenant DB
-    master.data-source.ts      # DataSource for master DB (used by CLI + scripts)
-    tenant.data-source.ts      # DataSource for tenant_template (CLI only)
-    migrate-tenants.ts         # runs pending tenant migrations on ALL tenants
-  migrations/
-    master/                    # master schema history
-    tenant/                    # tenant schema history (applied to every tenant)
-  tenant-db/                   # infrastructure only
-    tenant-connection.service.ts
-    tenant-db.module.ts
-    tenant.middleware.ts
-  tenants/                     # master DB feature: tenant registry
-    tenant.master.entity.ts
-    tenants.service.ts / controller / module
-  users/                       # example tenant-scoped feature
-    user.tenant.master.entity.ts      # owned by the feature
-    users.service.ts / controller / module
+    master/                    master DataSource + options
+    tenant/                    tenant DataSource options (per-tenant host/user/password)
+    scripts/                   migrate-tenants (canary + batches), seed-platform-admin
+  migrations/{master,tenant}/
+  modules/
+    master/                    CONTROL PLANE (master DB)
+      platform-auth/           platform admins: password + email OTP, rotating refresh tokens
+      tenants/                 registry, provisioning, branding, public host resolution
+    tenant/                    TENANT PLANE (one DB per school)
+      context/                 TenantMiddleware, TenantContext (ALS), TenantConnectionService
+      access/                  users, roles, permissions, user_roles entities + AccessService
+      auth/                    login, OTP, refresh, logout, me, change-password, TenantAuthGuard
+      users/                   school admin user management
 ```
 
----
-
-## 5. Conventions
-
-- **Tenant entity** : file name ends with `.tenant.master.entity.ts`, placed inside its own feature folder (e.g. `src/orders/order.tenant.master.entity.ts`). It is discovered automatically. No registration needed.
-- **Master entity** : any other `*.entity.ts`. Must be added explicitly to `master.data-source.ts` and `app.module.ts`.
-- **Never** put a tenant entity in the master config or the reverse.
-- **Never** edit or delete a migration that has been merged/applied elsewhere. Add a new one.
-- **Never** use `synchronize: true`.
+Adding a tenant feature module: import `TenantAuthModule`, apply `TenantMiddleware` to its controllers
+in `configure()`, guard them with `TenantAuthGuard` + `@RequirePermissions(...)`, and use `TenantContext`.
 
 ---
 
-## 6. Migration scripts
+## 5. Tenant authentication
+
+Full endpoint reference (payloads, responses, headers, errors): **[docs/API.md](docs/API.md)**.
+
+
+| Endpoint (all need `x-tenant-id`) | |
+|---|---|
+| `POST /auth/login` `{identifier, password}` | identifier = username, email or phone. Returns tokens, or `{status:"otp_required", challengeId}` |
+| `POST /auth/verify-otp` `{challengeId, code}` | 6-digit code sent by email, 5 min, 5 attempts |
+| `POST /auth/refresh` `{refreshToken}` | rotates; reusing an old refresh token revokes the whole session |
+| `POST /auth/logout` `{refreshToken}` | |
+| `GET /auth/me` | profile, roles, permissions |
+| `POST /auth/change-password` | revokes every other session, returns a new pair |
+| `POST/GET /users`, `GET /users/:id`, `PATCH /users/:id/status`, `POST /users/:id/reset-password` | needs `user.create` / `user.read` / `user.update` (+ `role.assign` to grant roles) |
+
+Rules:
+
+- OTP is required when `users.mfa_enabled` **or** the user holds a role with `roles.requires_mfa`
+  (seeded: `admin`, `principal`). Such users must have an email.
+- 5 wrong passwords lock the account for 15 min (atomic counter in the tenant DB, works across instances).
+  Unknown user, wrong password and locked account return the same message and take the same time.
+- `must_change_password` users can only call `me`, `change-password`, `logout` until they change it.
+- Access token: HS256, 15 min, `aud=tenant`, claims `sub`, `sid` (session), `tid` (tenant). Separate secret
+  from platform tokens. Refresh token: opaque `<id>.<secret>`, only its SHA-256 stored, 7 days, session max 30 days.
+- A user can't manage (suspend/reset) or grant roles to anyone with permissions they don't hold.
+
+## 6. Provisioning and tenant isolation
+
+`POST /tenants` (platform admin):
+
+1. Claims the slug with a `provisioning` row (unique constraint makes concurrent creates safe).
+2. Creates role `tenant_<slug>` (random password, sent as a SCRAM verifier so it never appears in logs,
+   stored AES-256-GCM encrypted with `TENANT_SECRETS_KEY`) and database `tenant_<slug>` owned by it.
+   `CONNECT` is revoked from `PUBLIC`, so one tenant's role cannot open another tenant's DB.
+3. Runs tenant migrations (creates tables, seeds roles/permissions), creates the first admin
+   (`must_change_password = true`, admin role → OTP at login).
+4. Marks the tenant `active`. On any failure it is marked `failed` with the error stored in
+   `provisioning_error`; send the same request again to retry (the half-built DB is dropped first).
+
+To move a large school to a dedicated server: restore its DB there, set `db_host` / `db_port` on its row.
+
+## 7. Migration scripts
 
 | Script | What it does |
 |---|---|
 | `npm run migration:master:generate -- src/migrations/master/<Name>` | Diff master entities vs master DB, write a migration |
 | `npm run migration:master:run` | Apply pending master migrations |
 | `npm run migration:master:revert` | Undo the last master migration |
-| `npm run migration:tenant:generate -- src/migrations/tenant/<Name>` | Diff `*.tenant.master.entity.ts` vs `tenant_template`, write a migration |
+| `npm run migration:tenant:generate -- src/migrations/tenant/<Name>` | Diff `*.tenant.entity.ts` vs `tenant_template`, write a migration |
 | `npm run migration:tenant:run` | Apply pending tenant migrations to `tenant_template` only |
 | `npm run migration:tenants:run-all` | Apply pending tenant migrations to **every** tenant in the registry |
 | `npm run migration:master:run:prod` | Production: master migrations from compiled `dist/` |
@@ -140,12 +165,12 @@ src/
 
 ---
 
-## 7. Development workflows
+## 8. Development workflows
 
 ### A. Change a master entity (e.g. add a column to `Tenant`)
 
 ```bash
-# 1. edit src/tenants/tenant.master.entity.ts
+# 1. edit src/modules/master/tenants/entities/tenant.master.entity.ts
 npm run migration:master:generate -- src/migrations/master/AddPlanToTenant
 # 2. open the generated file and review the SQL
 npm run migration:master:run
@@ -155,7 +180,7 @@ npm run migration:master:run
 ### B. Add or change a tenant entity (e.g. new `Order` entity)
 
 ```bash
-# 1. create/edit src/orders/order.tenant.master.entity.ts
+# 1. create/edit src/modules/tenant/orders/entities/order.tenant.entity.ts
 # 2. make sure tenant_template is up to date first (see workflow D)
 npm run migration:tenant:generate -- src/migrations/tenant/CreateOrders
 # 3. review the generated file
@@ -168,13 +193,7 @@ If generate says **"No changes in database schema were found"**, then either not
 
 ### C. Creating a tenant
 
-`POST /tenants` does, in this order:
-
-1. `CREATE DATABASE tenant_<slug>`
-2. Run all tenant migrations on it
-3. Save the row in the master `tenants` table
-
-If step 2 fails, the registry row is never saved, but the empty database exists. Drop `tenant_<slug>` in pgAdmin before retrying.
+See section 6. New tenants get every migration at creation time.
 
 ### D. After pulling teammates' changes
 
@@ -198,7 +217,7 @@ For tenant migrations, revert on `tenant_template` with the CLI, then write a ne
 
 ---
 
-## 8. Production deployment
+## 9. Production deployment
 
 Run order matters. **Migrate first, start the new code after.**
 
@@ -236,15 +255,14 @@ Tenants migrate one at a time, so old and new code can briefly coexist with diff
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Problem | Cause / fix |
 |---|---|
-| `database "tenant_x" already exists` on create | A previous create failed after `CREATE DATABASE`. Drop it in pgAdmin and retry. |
-| `permission denied to create database` | The DB role lacks `CREATEDB`. |
+| `extension "citext" is not available` | Install the Postgres contrib package (section 2). |
+| `permission denied to create database / role` | The DB role lacks `CREATEDB` / `CREATEROLE`. |
+| Tenant creation returned 500 | See `tenants.provisioning_error` and the server log; retry the same request. |
 | `relation "..." already exists` while running migrations | The DB was created earlier with `synchronize: true`. Recreate it empty and run migrations. |
-| Generate produces an empty migration or "no changes" | `tenant_template` is already in sync, or the entity file is not named `*.tenant.master.entity.ts`. |
 | Generate produces a huge migration that recreates everything | `tenant_template` is out of date. Run `npm run migration:tenant:run` first. |
-| Tenant tables appear in `master_db` (or the reverse) | An entity was registered in the wrong config. Check the suffix convention. |
-| `too many connections` | Each tenant pool holds up to 5 connections. Lower `extra.max`, evict idle pools, or put PgBouncer in front. |
-| `Cannot find module ... .d.ts` in production | Migration glob matched `.d.ts` files. Use the `.js`-only glob (see `tenant-options.ts`). |
+| `too many connections` | Lower `TENANT_DB_POOL_MAX` / `TENANT_POOL_MAX_TENANTS`, or put PgBouncer in front. |
+| Rate limit counts look wrong behind a load balancer | Set `TRUST_PROXY` to the number of proxies. |
