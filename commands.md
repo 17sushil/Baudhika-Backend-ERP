@@ -22,7 +22,21 @@ node dist/main
 # dump
 pg_dump -h localhost -p 5432 -U postgres -F c -v -f master_db.dump master_db
 
-# restore from dump file
-createdb -h localhost -U postgres master_db
-pg_restore -h localhost -U postgres -d master_db -v master_db.dump
+pg_dump -h localhost -U postgres -F c -f tenant_sunrise.dump tenant_sunrise
 
+pg_dumpall -h localhost -U postgres --roles-only -f roles.sql
+
+# restore from dump file
+<!-- createdb -h localhost -U postgres master_db -->
+<!-- pg_restore -h localhost -U postgres -d master_db -v master_db.dump -->
+
+
+pg_restore -h localhost -U postgres -C -d postgres -v master_db.dump
+
+pg_restore -h localhost -U postgres -C -d postgres -v tenant_sunrise.dump
+
+createdb -h localhost -U postgres tenant_template
+
+npm run migration:tenant:run
+
+npm run migration:tenants:run-all
