@@ -23,6 +23,6 @@ node dist/main
 pg_dump -h localhost -p 5432 -U postgres -F c -v -f master_db.dump master_db
 
 # restore from dump file
-createdb -h localhost -U postgres master_db_restored
-pg_restore -h localhost -U postgres -d master_db_restored -v master_db.dump
+createdb -h localhost -U postgres master_db
+pg_restore -h localhost -U postgres -d master_db -v master_db.dump
 
