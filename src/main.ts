@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { setupSwagger, SWAGGER_PATH, swaggerEnabled } from './common/swagger/swagger.setup';
 import { TenantsService } from './modules/master/tenants/services/tenants.service';
 import { TENANT_HEADER } from './modules/tenant/context/tenant.middleware';
 
@@ -18,10 +19,12 @@ async function bootstrap() {
   app.enableCors(corsOptions(app.get(TenantsService)));
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
   app.enableShutdownHooks();
+  if (swaggerEnabled()) setupSwagger(app);
 
   const port = process.env.PORT ?? 4000;
   await app.listen(port);
   logger.log(`Application is running on: http://localhost:${port}`);
+  if (swaggerEnabled()) logger.log(`API docs: http://localhost:${port}/${SWAGGER_PATH}`);
 }
 
 /** Allow the platform domain, every school subdomain, active custom domains and CORS_ORIGINS. */
