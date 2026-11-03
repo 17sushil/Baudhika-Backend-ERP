@@ -110,6 +110,8 @@ in `configure()`, guard them with `TenantAuthGuard` + `@RequirePermissions(...)`
 ## 5. Tenant authentication
 
 Full endpoint reference (payloads, responses, headers, errors): **[docs/API.md](docs/API.md)**.
+Interactive Swagger UI: **http://localhost:4000/docs** (JSON: `/docs-json`). Disabled when `NODE_ENV=production`
+unless `SWAGGER_ENABLED=true`.
 
 
 | Endpoint (all need `x-tenant-id`) | |
