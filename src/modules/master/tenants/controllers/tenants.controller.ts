@@ -28,13 +28,13 @@ export class TenantsController {
     return this.svc.list();
   }
 
-  /** Creates the tenant and its first admin. Retrying with the same slug resumes a failed attempt. */
+  /** Creates the tenant and its first principal. Retrying with the same slug resumes a failed attempt. */
   @Post()
   @ApiOperation({
     summary: 'Create a school',
     description:
-      'Creates a dedicated Postgres role + database, runs tenant migrations and creates the first school admin ' +
-      '(must change password at first login; OTP to adminEmail). On 500 the school is marked failed: send the same request again to retry.',
+      'Creates a dedicated Postgres role + database, runs tenant migrations and creates the first principal (top role) ' +
+      '(must change password at first login; OTP to principalEmail). On 500 the school is marked failed: send the same request again to retry.',
   })
   @ApiEnvelope(TenantViewDto, { status: 201, description: 'School created and active' })
   @ApiErrors({

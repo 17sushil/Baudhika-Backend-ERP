@@ -18,7 +18,7 @@
     "test:watch": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --watch",
     "test:cov": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --coverage",
     "test:debug": "node --inspect-brk --experimental-vm-modules -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config ./test/jest-e2e.json",
+    "test:e2e": "bash test/e2e/run.sh",
     "migration:master:generate": "typeorm-ts-node-commonjs migration:generate -d src/database/master/master.data-source.ts",
     "migration:master:run": "typeorm-ts-node-commonjs migration:run -d src/database/master/master.data-source.ts",
     "migration:master:revert": "typeorm-ts-node-commonjs migration:revert -d src/database/master/master.data-source.ts",
@@ -57,6 +57,7 @@
     "@types/jest": "^30.0.0",
     "@types/node": "^24.0.0",
     "@types/supertest": "^7.0.0",
+    "docx": "^9.14.0",
     "jest": "^30.0.0",
     "oxlint": "^1.58.0",
     "oxlint-tsgolint": "^7.0.2001",
@@ -68,5 +69,8 @@
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^6.0.2"
+  },
+  "overrides": {
+    "multer": "2.5.0"
   }
 }

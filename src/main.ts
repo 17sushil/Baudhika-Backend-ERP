@@ -14,6 +14,10 @@ async function bootstrap() {
   // Number of reverse proxies in front of the app; makes req.ip (rate limits, sessions) trustworthy.
   const trustProxy = process.env.TRUST_PROXY;
   if (trustProxy) app.set('trust proxy', /^\d+$/.test(trustProxy) ? +trustProxy : trustProxy);
+  else if (process.env.NODE_ENV === 'production') {
+    // Behind a load balancer every client would share the proxy's IP: one attacker could exhaust the login rate limit for everyone.
+    logger.warn('TRUST_PROXY is not set: if the app runs behind a proxy/load balancer, rate limits and audit IPs see the proxy address');
+  }
 
   app.use(helmet());
   app.enableCors(corsOptions(app.get(TenantsService)));

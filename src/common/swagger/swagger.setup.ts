@@ -34,7 +34,15 @@ export function setupSwagger(app: INestApplication) {
     .addTag('Tenants', 'School registry and provisioning (platform admin)')
     .addTag('Public', 'Unauthenticated lookups for the frontend')
     .addTag('School Auth', 'School user login, OTP, sessions')
-    .addTag('Users', 'School user management (school admin)')
+    .addTag('Users', 'School user management and role assignment (school admin)')
+    .addTag('Roles', 'Roles, permission catalogue and the role hierarchy (admin always holds everything)')
+    .addTag('Organization', 'Campuses (school/college branches), departments, designations, number series')
+    .addTag('Persons', 'One record per human: contacts, addresses, login link')
+    .addTag('Students', 'Admission, status lifecycle, health, guardian links')
+    .addTag('Guardians', 'Parents and guardians')
+    .addTag('Staff', 'Employees, teacher/driver profiles, qualifications')
+    .addTag('Dashboard', 'KPIs: total students, total staff (scope-aware)')
+    .addTag('Audit', 'Append-only change log')
     .build();
 
   const document = SwaggerModule.createDocument(app, config);

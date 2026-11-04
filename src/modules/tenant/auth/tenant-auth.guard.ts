@@ -1,7 +1,8 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { clientIp } from '../../../common/utils/client-ip.util';
 import { UUID_RE } from '../../../common/utils/crypto.util';
-import { ALLOW_PENDING_PASSWORD_KEY, PERMISSIONS_KEY } from '../access/access.decorators';
+import { ALLOW_PENDING_PASSWORD_KEY, ANY_PERMISSIONS_KEY, PERMISSIONS_KEY, SCOPED_PERMISSIONS_KEY } from '../access/access.decorators';
 import { UserStatus } from '../access/access.enums';
 import { AccessService } from '../access/access.service';
 import { User } from '../access/entities/user.tenant.entity';
@@ -63,13 +64,23 @@ export class TenantAuthGuard implements CanActivate {
       });
     }
 
-    req.auth = { userId: user.id, sessionId: payload.sid, tenantId: tenant.id, user };
+    req.auth = { userId: user.id, sessionId: payload.sid, tenantId: tenant.id, user, ip: clientIp(req) };
 
-    const required = this.reflector.getAllAndOverride<string[] | undefined>(PERMISSIONS_KEY, targets);
-    if (required?.length) {
-      const permissions = await this.access.institutionPermissions(user.id);
-      if (!required.every((p) => permissions.has(p))) throw new ForbiddenException('Missing permission');
-      req.auth.permissions = permissions;
+    const required = this.reflector.getAllAndOverride<string[] | undefined>(PERMISSIONS_KEY, targets) ?? [];
+    const scoped = this.reflector.getAllAndOverride<string[] | undefined>(SCOPED_PERMISSIONS_KEY, targets) ?? [];
+    const any = this.reflector.getAllAndOverride<string[] | undefined>(ANY_PERMISSIONS_KEY, targets) ?? [];
+    if (required.length || scoped.length || any.length) {
+      const grants = await this.access.grants(user.id);
+      const institution = new Set([...grants].filter(([, g]) => g.institution).map(([code]) => code));
+      const anyScope = (p: string) => {
+        const g = grants.get(p);
+        return !!g && (g.institution || g.campusIds.size > 0);
+      };
+      if (!required.every((p) => institution.has(p)) || !scoped.every(anyScope) || (any.length > 0 && !any.some(anyScope))) {
+        throw new ForbiddenException('Missing permission');
+      }
+      req.auth.permissions = institution;
+      req.auth.grants = grants;
     }
     return true;
   }
