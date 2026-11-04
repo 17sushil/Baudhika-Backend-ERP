@@ -11,6 +11,7 @@ import { DataSource, QueryFailedError, Repository } from 'typeorm';
 import { encryptSecret } from '../../../../common/utils/crypto.util';
 import { hashPassword } from '../../../../common/utils/password.util';
 import { masterOptions } from '../../../../database/master/master-options';
+import { TOP_ROLE } from '../../../../database/tenant/seed-permissions';
 import { TenantDbTarget } from '../../../../database/tenant/tenant-options';
 import { ScopeKind } from '../../../tenant/access/access.enums';
 import { Role } from '../../../tenant/access/entities/role.tenant.entity';
@@ -29,7 +30,7 @@ const DB_IDENT_RE = /^tenant_[a-z0-9_]{3,30}$/;
 
 /**
  * Creates a tenant: claims the slug, creates a dedicated Postgres role + database, runs tenant
- * migrations, creates the first school admin, then marks the tenant active.
+ * migrations, creates the first principal, then marks the tenant active.
  * On failure the tenant is marked FAILED and the same request can simply be retried.
  */
 @Injectable()
@@ -61,7 +62,7 @@ export class TenantProvisioningService {
       const target: TenantDbTarget = { database: dbName, username: dbName, password: dbPassword };
       await this.connections.withDataSource(target, async (ds) => {
         await ds.runMigrations({ transaction: 'each' });
-        await this.createFirstAdmin(ds, dto.adminEmail, dto.adminPassword);
+        await this.createFirstPrincipal(ds, dto.principalEmail, dto.principalPassword);
       });
 
       await this.repo.update(tenant.id, { status: TenantStatus.ACTIVE, provisioningError: null });
@@ -156,15 +157,16 @@ export class TenantProvisioningService {
     }
   }
 
-  private async createFirstAdmin(ds: DataSource, email: string, password: string) {
+  /** The first account of every school is its principal: the top role, who then creates admins and staff logins. */
+  private async createFirstPrincipal(ds: DataSource, email: string, password: string) {
     const passwordHash = await hashPassword(password);
     await ds.transaction(async (m) => {
       const users = m.getRepository(User);
       const user = await users.save(
         users.create({ email: email.toLowerCase(), passwordHash, mustChangePassword: true }),
       );
-      const admin = await m.getRepository(Role).findOneByOrFail({ code: 'admin' });
-      await m.getRepository(UserRole).insert({ userId: user.id, roleId: admin.id, scopeType: ScopeKind.INSTITUTION });
+      const principal = await m.getRepository(Role).findOneByOrFail({ code: TOP_ROLE });
+      await m.getRepository(UserRole).insert({ userId: user.id, roleId: principal.id, scopeType: ScopeKind.INSTITUTION });
     });
   }
 }

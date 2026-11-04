@@ -18,10 +18,20 @@ export class LoginOtpRequiredDto {
 }
 
 export class RoleGrantDto {
-  @ApiProperty({ example: 'admin' }) code: string;
+  /** Use with DELETE /users/:id/roles/:assignmentId. */
+  @ApiProperty({ format: 'uuid' }) assignmentId: string;
+  @ApiProperty({ example: 'principal' }) code: string;
   @ApiProperty({ example: 'Administrator' }) name: string;
   @ApiProperty({ enum: ScopeKind, enumName: 'ScopeKind', example: ScopeKind.INSTITUTION }) scopeType: ScopeKind;
   @ApiProperty({ type: String, format: 'uuid', nullable: true, example: null }) scopeId: string | null;
+  @ApiProperty({ type: String, nullable: true, example: null }) validFrom: string | null;
+  @ApiProperty({ type: String, nullable: true, example: null }) validTo: string | null;
+}
+
+export class MePersonDto {
+  @ApiProperty({ format: 'uuid' }) id: string;
+  @ApiProperty({ example: 'Sita Sharma' }) displayName: string;
+  @ApiProperty({ type: String, format: 'uuid', nullable: true }) photoFileId: string | null;
 }
 
 export class MeTenantDto {
@@ -42,4 +52,6 @@ export class MeDto {
   /** Permission codes granted school-wide; use them to show/hide UI. */
   @ApiProperty({ type: [String], example: ['user.read', 'user.create', 'user.update'] }) permissions: string[];
   @ApiProperty({ type: MeTenantDto }) tenant: MeTenantDto;
+  /** The person this login belongs to (null until linked via PUT /persons/:id/user). */
+  @ApiProperty({ type: MePersonDto, nullable: true }) person: MePersonDto | null;
 }

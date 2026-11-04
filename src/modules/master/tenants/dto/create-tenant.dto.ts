@@ -9,7 +9,7 @@ export class CreateTenantDto {
   })
   @IsString() @Length(3, 30) slug: string;
 
-  /** First school administrator. Must change the password at first login; OTP goes to this email. */
-  @ApiProperty({ example: 'admin@sunrise.edu' }) @IsEmail() @MaxLength(254) adminEmail: string;
-  @ApiProperty({ example: 'Sunrise-Admin-2026' }) @IsString() @Length(12, 128) adminPassword: string;
+  /** First account of the school: its principal (top role). Must change the password at first login; OTP goes to this email. */
+  @ApiProperty({ example: 'principal@sunrise.edu' }) @IsEmail() @MaxLength(254) principalEmail: string;
+  @ApiProperty({ example: 'Sunrise-Principal-2026' }) @IsString() @Length(12, 128) principalPassword: string;
 }

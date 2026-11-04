@@ -94,9 +94,10 @@ export class TenantAuthController {
   @ApiEnvelope(MeDto)
   async me(@Req() req: TenantRequest) {
     const u = req.auth.user;
-    const [roles, permissions] = await Promise.all([
+    const [roles, permissions, [person]] = await Promise.all([
       this.access.roles([u.id]),
       this.access.institutionPermissions(u.id),
+      this.access.linkedPerson(u.id),
     ]);
     return {
       id: u.id,
@@ -110,6 +111,7 @@ export class TenantAuthController {
       roles: roles.get(u.id) ?? [],
       permissions: [...permissions].sort(),
       tenant: { slug: req.tenant.slug, name: req.tenant.name },
+      person: person ?? null,
     };
   }
 

@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import { In, QueryFailedError } from 'typeorm';
 import { hashPassword } from '../../../common/utils/password.util';
+import { isUniqueViolation } from '../../../common/utils/sql.util';
+import { TOP_ROLE } from '../../../database/tenant/seed-permissions';
 import { ScopeKind, UserStatus } from '../access/access.enums';
 import { AccessService, RoleGrant } from '../access/access.service';
 import { Role } from '../access/entities/role.tenant.entity';
@@ -14,7 +16,10 @@ import { UserRole } from '../access/entities/user-role.tenant.entity';
 import { User } from '../access/entities/user.tenant.entity';
 import { TenantAuth } from '../auth/auth.types';
 import { TenantTokenService } from '../auth/services/tenant-token.service';
+import { AuditAction } from '../audit/audit.enums';
+import { AuditService } from '../audit/audit.service';
 import { TenantContext } from '../context/tenant-context';
+import { AssignRoleDto } from './dto/assign-role.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { ListUsersDto } from './dto/list-users.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
@@ -45,6 +50,7 @@ export class UsersService {
     private ctx: TenantContext,
     private access: AccessService,
     private tokens: TenantTokenService,
+    private audit: AuditService,
   ) {}
 
   async create(dto: CreateUserDto, actor: TenantAuth) {
@@ -83,6 +89,12 @@ export class UsersService {
             roles.map((r) => ({ userId: saved.id, roleId: r.id, scopeType: ScopeKind.INSTITUTION, createdBy: actor.userId })),
           );
         }
+        // snapshot() drops passwordHash.
+        await this.audit.record(
+          actor,
+          { table: 'users', recordId: saved.id, action: AuditAction.INSERT, after: { ...saved, roles: roleCodes.join(',') } },
+          m,
+        );
         return saved;
       });
       return this.get(user.id);
@@ -119,11 +131,13 @@ export class UsersService {
 
   async setStatus(id: string, status: UserStatus, actor: TenantAuth) {
     if (id === actor.userId) throw new BadRequestException('You cannot change your own status');
-    await this.findManageable(id, actor);
+    const before = await this.findManageable(id, actor);
 
     await this.ctx.dataSource.transaction(async (m) => {
       await m.getRepository(User).update(id, { status, updatedBy: actor.userId });
       if (status !== UserStatus.ACTIVE) await this.tokens.revokeAllForUser(id, m);
+      const after = await m.getRepository(User).findOneOrFail({ where: { id } });
+      await this.audit.record(actor, { table: 'users', recordId: id, action: AuditAction.UPDATE, before, after }, m);
     });
     return this.get(id);
   }
@@ -143,8 +157,85 @@ export class UsersService {
         updatedBy: actor.userId,
       });
       await this.tokens.revokeAllForUser(id, m);
+      // Record that a reset happened and by whom; never the password or its hash.
+      await this.audit.record(
+        actor,
+        { table: 'users', recordId: id, action: AuditAction.UPDATE, after: { passwordReset: true, mustChangePassword: dto.mustChangePassword ?? true } },
+        m,
+      );
     });
     return this.get(id);
+  }
+
+  /** Grants a role, optionally limited to one campus (branch admin) or department (HOD). */
+  async assignRole(userId: string, dto: AssignRoleDto, actor: TenantAuth) {
+    const user = await this.ctx.repo(User).findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+    const role = await this.ctx.repo(Role).findOne({ where: { code: dto.role } });
+    if (!role) throw new BadRequestException('Unknown role');
+    await this.assertCanGrant(actor, await this.access.rolePermissions([role.id]));
+
+    const scopeType = dto.scopeType ?? ScopeKind.INSTITUTION;
+    if (scopeType === ScopeKind.INSTITUTION && dto.scopeId) throw new BadRequestException('Institution scope takes no scopeId');
+    if (scopeType !== ScopeKind.INSTITUTION && !dto.scopeId) throw new BadRequestException(`scopeId is required for ${scopeType} scope`);
+    if (scopeType === ScopeKind.CLASS || scopeType === ScopeKind.SECTION) {
+      throw new BadRequestException('Class and section scopes become available with the academic module');
+    }
+    if (scopeType === ScopeKind.CAMPUS || scopeType === ScopeKind.DEPARTMENT) {
+      const table = scopeType === ScopeKind.CAMPUS ? 'campuses' : 'departments';
+      // table is one of two literals, never user input.
+      const [{ ok }] = await this.ctx.dataSource.query(
+        `SELECT EXISTS (SELECT 1 FROM ${table} WHERE id = $1 AND deleted_at IS NULL) AS ok`,
+        [dto.scopeId],
+      );
+      if (!ok) throw new BadRequestException(`${scopeType} not found`);
+    }
+    if (dto.validFrom && dto.validTo && dto.validTo < dto.validFrom) throw new BadRequestException('validTo must be on or after validFrom');
+
+    try {
+      await this.ctx.dataSource.transaction(async (m) => {
+        const repo = m.getRepository(UserRole);
+        const row = await repo.save(
+          repo.create({
+            userId,
+            roleId: role.id,
+            scopeType,
+            scopeId: dto.scopeId ?? null,
+            validFrom: dto.validFrom ?? null,
+            validTo: dto.validTo ?? null,
+            createdBy: actor.userId,
+          }),
+        );
+        await this.audit.record(actor, { table: 'user_roles', recordId: row.id, action: AuditAction.INSERT, after: { ...row, roleCode: role.code } }, m);
+      });
+    } catch (e) {
+      if (isUniqueViolation(e, 'uq_user_roles_assignment')) throw new ConflictException('User already has this role on this scope');
+      throw e;
+    }
+    return this.get(userId);
+  }
+
+  async revokeRole(userId: string, assignmentId: string, actor: TenantAuth) {
+    const row = await this.ctx.repo(UserRole).findOne({ where: { id: assignmentId, userId }, relations: { role: true } });
+    if (!row) throw new NotFoundException('Role assignment not found');
+    // Revoking is as powerful as granting: an admin can't strip a principal.
+    await this.assertCanGrant(actor, await this.access.rolePermissions([row.roleId]));
+
+    if (row.role!.code === TOP_ROLE && row.scopeType === ScopeKind.INSTITUTION) {
+      const [{ n }] = await this.ctx.dataSource.query(
+        `SELECT count(*)::int AS n FROM user_roles ur JOIN roles r ON r.id = ur.role_id JOIN users u ON u.id = ur.user_id
+          WHERE r.code = $2 AND ur.scope_type = 'institution' AND ur.id <> $1
+            AND u.deleted_at IS NULL AND u.status = 'active'
+            AND (ur.valid_from IS NULL OR ur.valid_from <= CURRENT_DATE) AND (ur.valid_to IS NULL OR ur.valid_to >= CURRENT_DATE)`,
+        [assignmentId, TOP_ROLE],
+      );
+      if (!n) throw new ConflictException('Cannot remove the last school principal');
+    }
+    await this.ctx.dataSource.transaction(async (m) => {
+      await m.getRepository(UserRole).delete(assignmentId);
+      await this.audit.record(actor, { table: 'user_roles', recordId: assignmentId, action: AuditAction.DELETE, before: { ...row, roleCode: row.role!.code } }, m);
+    });
+    return this.get(userId);
   }
 
   /** Target must exist and hold no permission the actor lacks (a principal can't lock out an admin). */

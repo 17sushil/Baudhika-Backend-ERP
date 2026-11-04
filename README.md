@@ -68,7 +68,7 @@ Create a school (platform admin token from `POST /platform/auth/login` + `verify
 ```bash
 curl -X POST localhost:4000/tenants -H "Authorization: Bearer $PLATFORM_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"Sunrise School","slug":"sunrise","adminEmail":"admin@sunrise.edu","adminPassword":"a-long-initial-password"}'
+  -d '{"name":"Sunrise School","slug":"sunrise","principalEmail":"principal@sunrise.edu","principalPassword":"a-long-initial-password"}'
 ```
 
 ---
@@ -83,8 +83,10 @@ src/
   common/
     constants/                 throttle presets
     interceptors/              TransformInterceptor: { statusCode, message, data } success envelope
-    utils/                     crypto (hashing, AES-GCM), passwords (argon2id), client IP
-                               (add guards/, decorators/, filters/ here as they appear)
+    utils/                     crypto, passwords (argon2id), client IP, sql (LIKE escape, constraint errors), dates
+    decorators/                validation helpers (IsDateOnly, Trim, IsOptionalNonNull)
+    dto/                       pagination, shared response DTOs
+    swagger/                   setup (/docs) and response/auth decorators
   infra/mail/                  MailService (console driver in dev)
   database/
     master/                    master DataSource + options
@@ -99,41 +101,100 @@ src/
       context/                 TenantMiddleware, TenantContext (ALS), TenantConnectionService
       access/                  users, roles, permissions, user_roles entities + AccessService
       auth/                    login, OTP, refresh, logout, me, change-password, TenantAuthGuard
-      users/                   school admin user management
+      users/                   school admin user management, scoped role assignment
+      audit/                   append-only audit trail (GET /audit-logs)
+      organization/            campuses (school/college branches), departments, designations, number series
+      files/                   file metadata (upload API comes with S3)
+      people/                  persons, contacts, addresses, phone lookup, login link
+      guardians/               parents/guardians
+      students/                admission, status lifecycle, health, guardian links
+      staff/                   employees, teacher/driver profiles, qualifications
+test/e2e/                      API end-to-end suites + runner (npm run test:e2e)
+scripts/generate-api-docx.js   Word API reference generator (npm run docs:api)
+docs/                          generated School_ERP_API_Reference.docx
 ```
 
 Adding a tenant feature module: import `TenantAuthModule`, apply `TenantMiddleware` to its controllers
-in `configure()`, guard them with `TenantAuthGuard` + `@RequirePermissions(...)`, and use `TenantContext`.
+in `configure()`, guard them with `TenantAuthGuard` + `@RequirePermissions(...)` (institution-wide) or
+`@RequireAccess(...)` (institution or campus; then filter with `campusScope()`), and use `TenantContext`.
+See AGENTS.md for the full conventions.
 
 ---
 
-## 5. Tenant authentication
+## 5. API, roles and access
 
-Full endpoint reference (payloads, responses, headers, errors): **[docs/API.md](docs/API.md)**.
-Interactive Swagger UI: **http://localhost:4000/docs** (JSON: `/docs-json`). Disabled when `NODE_ENV=production`
-unless `SWAGGER_ENABLED=true`.
+**Docs**
+- Swagger UI: **http://localhost:4000/docs** (JSON: `/docs-json`), generated from the code. Disabled when
+  `NODE_ENV=production` unless `SWAGGER_ENABLED=true`.
+- Word reference: **[docs/School_ERP_API_Reference.docx](docs/School_ERP_API_Reference.docx)**: every endpoint with
+  auth, parameters, each request field and its rules, response codes, and real request/response examples recorded by
+  the e2e suite, plus roles, permissions and workflows. Regenerate after API changes with `npm run docs:api`.
 
+Every success response is `{ statusCode, message: "success", data }`; errors are `{ statusCode, error, message }`.
 
-| Endpoint (all need `x-tenant-id`) | |
+| Group | Endpoints (school routes need `x-tenant-id`) |
 |---|---|
-| `POST /auth/login` `{identifier, password}` | identifier = username, email or phone. Returns tokens, or `{status:"otp_required", challengeId}` |
-| `POST /auth/verify-otp` `{challengeId, code}` | 6-digit code sent by email, 5 min, 5 attempts |
-| `POST /auth/refresh` `{refreshToken}` | rotates; reusing an old refresh token revokes the whole session |
-| `POST /auth/logout` `{refreshToken}` | |
-| `GET /auth/me` | profile, roles, permissions |
-| `POST /auth/change-password` | revokes every other session, returns a new pair |
-| `POST/GET /users`, `GET /users/:id`, `PATCH /users/:id/status`, `POST /users/:id/reset-password` | needs `user.create` / `user.read` / `user.update` (+ `role.assign` to grant roles) |
+| Platform | `/platform/auth/*` (login + OTP), `/tenants` (create school, branding), `/public/tenants/resolve` |
+| School auth | `/auth/login`, `/auth/verify-otp`, `/auth/refresh`, `/auth/logout`, `/auth/me`, `/auth/change-password` |
+| Users | `/users` CRUD-ish, `/users/:id/status`, `/users/:id/reset-password`, `/users/:id/roles` (grant/revoke, campus scope) |
+| Roles | `/permissions` (catalogue), `/roles` list/create/edit/delete (custom roles, hierarchy) |
+| Organization | `/campuses` (school/college branches), `/departments`, `/designations`, `/number-sequences` |
+| People | `/persons` (+ `/lookup`, contacts, addresses, `PUT /persons/:id/user` login link) |
+| Students | `/students` (+ `/status`, `/status-history`, `/health`, `/guardians`) |
+| Guardians / Staff | `/guardians`, `/staff` (+ `/status`, teacher/driver profiles, qualifications) |
+| Dashboard | `/dashboard/kpis`: total students (enrolled, applicants, all, by status/gender/campus, admissions) and total staff (current, by type/campus) |
+| Audit | `/audit-logs` |
 
-Rules:
-
-- OTP is required when `users.mfa_enabled` **or** the user holds a role with `roles.requires_mfa`
-  (seeded: `admin`, `principal`). Such users must have an email.
-- 5 wrong passwords lock the account for 15 min (atomic counter in the tenant DB, works across instances).
-  Unknown user, wrong password and locked account return the same message and take the same time.
+**Login rules**
+- OTP is required when `users.mfa_enabled` **or** the user holds a role with `requires_mfa` (seeded: `admin`,
+  `principal`). Such users must have an email.
+- 5 wrong passwords lock the account for 15 min; unknown user, wrong password and locked account look identical.
 - `must_change_password` users can only call `me`, `change-password`, `logout` until they change it.
-- Access token: HS256, 15 min, `aud=tenant`, claims `sub`, `sid` (session), `tid` (tenant). Separate secret
-  from platform tokens. Refresh token: opaque `<id>.<secret>`, only its SHA-256 stored, 7 days, session max 30 days.
-- A user can't manage (suspend/reset) or grant roles to anyone with permissions they don't hold.
+- Access token 15 min (`aud=tenant`, bound to the school via `tid`); refresh token single use, 7 days, session max 30 days.
+
+**Roles and branches**
+- `principal` is the top role of every school: it holds **every** permission (including `role.manage`), always requires OTP,
+  can't lose a permission or be deleted, and gets new permissions from future releases automatically. The first account of
+  every school (`POST /tenants`: `principalEmail` / `principalPassword`) is its principal; the last one can't be removed.
+- `admin` sits below: every permission except `role.manage`. It runs the school (logins, roles below principal, students,
+  staff, settings, audit) but can't design roles or grant `principal`.
+- Role hierarchy = permission sets: you can only create, edit, assign, revoke or delete a role whose permissions you all
+  hold yourself. A "role officer" with `role.manage` but fewer permissions manages roles below them, never the principal.
+  Manage roles with `GET /permissions`, `GET/POST /roles`, `PATCH/DELETE /roles/:id` (custom roles like `librarian`).
+- Roles carry permissions; `POST /users/:id/roles` assigns a role at `institution` scope (whole school) or `campus` scope
+  (one branch). A campus-scoped user only sees and edits that branch's students, staff and their families.
+- Nobody can grant, revoke or manage access beyond their own; the last school admin can't be removed.
+- Religion/ethnicity, guardian income and health records need their own permissions (health reads are audited).
+
+**Create an admin** (as the principal; the first principal comes from `POST /tenants`):
+
+```bash
+# admin logins always get an email OTP, so give them an email
+curl -s -X POST $API/users -H 'x-tenant-id: sunrise' -H "Authorization: Bearer $PRINCIPAL_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"email":"admin@sunrise.edu","username":"office.admin","password":"Welcome2026","mustChangePassword":true,"roles":["admin"]}'
+# another principal, e.g. for one branch (only a principal can grant it)
+curl -s -X POST $API/users/$USER_ID/roles -H 'x-tenant-id: sunrise' -H "Authorization: Bearer $PRINCIPAL_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"role":"principal","scopeType":"campus","scopeId":"<campus id>"}'
+```
+
+**Security notes** (full list in the Word reference, chapter 5)
+- `audit.read` does not bypass sensitive data: health snapshots, religion/ethnicity and guardian income are redacted for
+  readers without those permissions. Account creation, suspension and password resets are audited; secrets never are.
+- Production refuses `MAIL_DRIVER=console` (it would log OTP codes) and warns when `TRUST_PROXY` is unset.
+- Production dependencies: `npm audit --omit=dev` reports 0 vulnerabilities (multer pinned to 2.5.0 via `overrides`).
+
+## 5a. Testing
+
+| Command | What it does |
+|---|---|
+| `npm test` | Unit tests (Jest). |
+| `npm run test:e2e` | 278 API checks against a real server + Postgres: auth, isolation, sessions, lockout, rate limits, every CRUD endpoint, business rules, role hierarchy, branch scoping, sensitive fields, KPIs, audit redaction. ~2 min. |
+| `npm run docs:api` | Runs the e2e suite and rebuilds the Word API reference from its real samples. |
+
+`test:e2e` is self-contained: it creates `erp_e2e_master` (plus `tenant_e2eschool` / `tenant_e2eother`), builds
+the app, starts it on port 4100 (`E2E_PORT` to change), runs `test/e2e/auth.sh`, `people.sh`, `roles.sh` and `dashboard.sh`, and
+always drops those databases and roles afterwards. It never touches `master_db` or your schools.
+Needs `psql`, `curl`, `jq`, Postgres with contrib, and `DB_*` in `.env`.
 
 ## 6. Provisioning and tenant isolation
 
@@ -143,8 +204,8 @@ Rules:
 2. Creates role `tenant_<slug>` (random password, sent as a SCRAM verifier so it never appears in logs,
    stored AES-256-GCM encrypted with `TENANT_SECRETS_KEY`) and database `tenant_<slug>` owned by it.
    `CONNECT` is revoked from `PUBLIC`, so one tenant's role cannot open another tenant's DB.
-3. Runs tenant migrations (creates tables, seeds roles/permissions), creates the first admin
-   (`must_change_password = true`, admin role → OTP at login).
+3. Runs tenant migrations (creates tables, seeds roles/permissions), creates the first principal
+   (`must_change_password = true`, principal role → OTP at login).
 4. Marks the tenant `active`. On any failure it is marked `failed` with the error stored in
    `provisioning_error`; send the same request again to retry (the half-built DB is dropped first).
 

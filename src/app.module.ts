@@ -10,8 +10,16 @@ import { validateEnv } from './config/env.validation';
 import { masterOptions } from './database/master/master-options';
 import { PlatformModule } from './modules/master/platform-auth/platform.module';
 import { TenantsModule } from './modules/master/tenants/tenants.module';
+import { AuditModule } from './modules/tenant/audit/audit.module';
 import { TenantAuthModule } from './modules/tenant/auth/tenant-auth.module';
 import { TenantDbModule } from './modules/tenant/context/tenant-db.module';
+import { DashboardModule } from './modules/tenant/dashboard/dashboard.module';
+import { GuardiansModule } from './modules/tenant/guardians/guardians.module';
+import { OrganizationModule } from './modules/tenant/organization/organization.module';
+import { PeopleModule } from './modules/tenant/people/people.module';
+import { RolesModule } from './modules/tenant/roles/roles.module';
+import { StaffModule } from './modules/tenant/staff/staff.module';
+import { StudentsModule } from './modules/tenant/students/students.module';
 import { UsersModule } from './modules/tenant/users/users.module';
 
 @Module({
@@ -29,6 +37,14 @@ import { UsersModule } from './modules/tenant/users/users.module';
     // Tenant plane (one DB per school)
     TenantAuthModule,
     UsersModule,
+    RolesModule,
+    AuditModule,
+    OrganizationModule,
+    PeopleModule,
+    GuardiansModule,
+    StudentsModule,
+    StaffModule,
+    DashboardModule,
   ],
   controllers: [AppController],
   providers: [
